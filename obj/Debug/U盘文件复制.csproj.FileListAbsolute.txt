@@ -1,0 +1,12 @@
+C:\Users\Administrator\Desktop\编程\C#\U盘文件复制\bin\Debug\U盘文件复制.exe.config
+C:\Users\Administrator\Desktop\编程\C#\U盘文件复制\bin\Debug\U盘文件复制.exe
+C:\Users\Administrator\Desktop\编程\C#\U盘文件复制\bin\Debug\U盘文件复制.pdb
+C:\Users\Administrator\Desktop\编程\C#\U盘文件复制\obj\Debug\U盘文件复制.csproj.AssemblyReference.cache
+C:\Users\Administrator\Desktop\编程\C#\U盘文件复制\obj\Debug\U盘文件复制.Form1.resources
+C:\Users\Administrator\Desktop\编程\C#\U盘文件复制\obj\Debug\U盘文件复制.Properties.Resources.resources
+C:\Users\Administrator\Desktop\编程\C#\U盘文件复制\obj\Debug\U盘文件复制.csproj.GenerateResource.cache
+C:\Users\Administrator\Desktop\编程\C#\U盘文件复制\obj\Debug\U盘文件复制.csproj.CoreCompileInputs.cache
+C:\Users\Administrator\Desktop\编程\C#\U盘文件复制\obj\Debug\U盘文件复制.exe
+C:\Users\Administrator\Desktop\编程\C#\U盘文件复制\obj\Debug\U盘文件复制.pdb
+C:\Users\Administrator\Desktop\编程\C#\U盘文件复制\bin\Debug\Microsoft.Win32.Registry.dll
+C:\Users\Administrator\Desktop\编程\C#\U盘文件复制\obj\Debug\U盘文件复制.csproj.Up2Date
