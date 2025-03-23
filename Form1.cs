@@ -52,7 +52,7 @@ namespace U盘文件复制
             // 配置托盘图标
             notifyIcon = new NotifyIcon();
             notifyIcon.Text = "U盘文件复制工具";
-            notifyIcon.Icon = this.Icon;//采用透明图标
+            notifyIcon.Icon = this.Icon;
             notifyIcon.ContextMenuStrip = trayMenu;
             notifyIcon.Visible = false;
 
