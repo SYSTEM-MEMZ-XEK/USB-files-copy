@@ -1,6 +1,6 @@
-###禁止用于商业
-###禁止用于窃取包括但不限于国家机密，商业机密
-# U盘文件复制工具
+# 禁止用于商业
+# 禁止用于窃取包括但不限于国家机密，商业机密
+## U盘文件复制工具
 
 ![.NET Framework](https://img.shields.io/badge/.NET%20Framework-4.7.2-blue)
 ![License](https://img.shields.io/badge/License-MIT-green)
