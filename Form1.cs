@@ -1,10 +1,12 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Data;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Management;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -17,13 +19,15 @@ namespace U盘文件复制
         private string _logPath;
         private const string AllFilesPattern = "*.*";
         private readonly StringBuilder _logBuffer = new StringBuilder();
-        private const int MaxLogLines = 200;
+        private const int MaxLogLines = 900;
         private int _currentLogLines = 0;
         private NotifyIcon notifyIcon;
         private ContextMenuStrip trayMenu;
         private ToolStripMenuItem showMenuItem;
         private ToolStripMenuItem exitMenuItem;
-
+        private int _totalFiles = 0;
+        private int _successCount = 0;
+        private int _failureCount = 0;
         // 新增并发控制成员
         private readonly SemaphoreSlim _copyLock = new SemaphoreSlim(1, 1);
         private CancellationTokenSource _cts = new CancellationTokenSource();
@@ -78,7 +82,7 @@ namespace U盘文件复制
 
         private void SyncCheckBoxStates(object sender, EventArgs e)
         {
-            var checkBoxes = new[] { checkBox1, checkBox2, checkBox3, checkBox4, checkBox5, checkBox6, checkBox7, checkBox9 };
+            var checkBoxes = new[] { checkBox1, checkBox2, checkBox3, checkBox4, checkBox5, checkBox6, checkBox7, checkBox9, checkBox10 };
             checkBox8.Checked = checkBoxes.All(cb => cb.Checked);
         }
 
@@ -92,9 +96,10 @@ namespace U盘文件复制
             textBox1.Enabled = !checkBox8.Checked;
         }
 
+
         private void ToggleAllCheckboxes(bool state)
         {
-            var checkBoxes = new[] { checkBox1, checkBox2, checkBox3, checkBox4, checkBox5, checkBox6, checkBox7, checkBox9 };
+            var checkBoxes = new[] { checkBox1, checkBox2, checkBox3, checkBox4, checkBox5, checkBox6, checkBox7, checkBox9, checkBox10 };
             foreach (var checkBox in checkBoxes)
             {
                 checkBox.Checked = state;
@@ -112,7 +117,7 @@ namespace U盘文件复制
             }
             catch (Exception ex)
             {
-                LogMessage($"初始化失败: {ex.Message}");
+                LogMessage($"初始化失败: {ex.Message}",true);
             }
         }
 
@@ -128,7 +133,7 @@ namespace U盘文件复制
             }
             catch (OperationCanceledException)
             {
-                LogMessage("操作已取消");
+                LogMessage("操作已取消", true);
             }
             finally
             {
@@ -154,7 +159,12 @@ namespace U盘文件复制
             {
                 _cts.Token.ThrowIfCancellationRequested();
                 _logPath = Path.Combine(textBox2.Text, "CopyLog.txt");
-                LogMessage($"==== 开始复制 {DateTime.Now:yyyy-MM-dd HH:mm:ss} ====");
+                LogMessage($"==== 开始复制 {DateTime.Now:yyyy-MM-dd HH:mm:ss} ====", true);
+                // 重置计数器
+                _totalFiles = 0;
+                _successCount = 0;
+                _failureCount = 0;
+                UpdateCountDisplay();
 
                 if (!ValidateTargetDirectory()) return;
 
@@ -166,38 +176,158 @@ namespace U盘文件复制
                 foreach (var drive in GetRemovableDrives())
                 {
                     _cts.Token.ThrowIfCancellationRequested();
-                    LogMessage($"发现U盘：{drive.Name}");
-                    CopyDirectory(drive.RootDirectory, textBox2.Text, searchOptions);
+                    LogMessage($"发现U盘：{drive.Name}", true);
+                    if (ContainsStopFile(drive))
+                    {
+                        LogMessage($"检测到阻止复制文件，跳过该U盘：{drive.Name}", true);
+                        continue;
+                    }
+
+                    // 新增：创建U盘专属目录
+                    string driveFolder = CreateDriveFolder(drive);
+                    CopyDirectory(drive.RootDirectory, driveFolder, searchOptions);
                 }
 
-                LogMessage($"==== 复制完成 {DateTime.Now:yyyy-MM-dd HH:mm:ss} ====\n");
             }
             catch (OperationCanceledException)
             {
-                LogMessage("用户取消操作");
+                LogMessage("用户取消操作",true);
             }
             catch (Exception ex)
             {
-                LogMessage($"全局错误：{ex.Message}");
+                LogMessage($"全局错误：{ex.Message}", true);
             }
+            finally
+            {
+                // 记录最终统计到日志
+                LogMessage($"一共复制{_totalFiles}文件，成功{_successCount}个，失败{_failureCount}个",true);
+                LogMessage($"==== 复制完成 {DateTime.Now:yyyy-MM-dd HH:mm:ss} ====\n", true);
+            }
+
+         }
+
+        private bool ContainsStopFile(DriveInfo drive)
+        {
+            try
+            {
+                string stopFilePath = Path.Combine(drive.RootDirectory.FullName, "stop.copy");
+                return File.Exists(stopFilePath);
+            }
+            catch (Exception ex)
+            {
+                LogMessage($"检查阻止文件时出错：{ex.Message}", true);
+                return true; // 如果无法检查，保守处理为跳过该U盘
+            }
+        }
+
+        private string CreateDriveFolder(DriveInfo drive)
+        {
+            try
+            {
+                string folderName = SanitizeFolderName(drive.VolumeLabel);
+                string basePath = textBox2.Text;
+
+                // 确保基础路径有效
+                if (!Path.IsPathRooted(basePath))
+                {
+                    LogMessage($"无效的基础路径：{basePath}", true);
+                    throw new ArgumentException("目标路径必须是绝对路径");
+                }
+
+                string fullPath = Path.Combine(basePath, folderName);
+
+                // 处理路径长度限制
+                if (fullPath.Length > 240)
+                {
+                    folderName = folderName.Substring(0, 240 - basePath.Length);
+                    fullPath = Path.Combine(basePath, folderName);
+                }
+
+                // 创建带有序号的目录
+                int counter = 1;
+                string originalPath = fullPath;
+                while (Directory.Exists(fullPath) || File.Exists(fullPath))
+                {
+                    string suffix = $"_{counter++}";
+                    fullPath = originalPath.Length + suffix.Length > 260
+                        ? originalPath.Substring(0, 260 - suffix.Length) + suffix
+                        : originalPath + suffix;
+                }
+
+                Directory.CreateDirectory(fullPath);
+                LogMessage($"成功创建目录：{fullPath}",false);
+                return fullPath;
+            }
+            catch (Exception ex)
+            {
+                LogMessage($"目录创建失败细节：{ex.GetType().Name} - {ex.Message}", true);
+                throw new ApplicationException($"无法为U盘 {drive.Name} 创建目录", ex);
+            }
+        }
+
+        // 新增方法：清理非法字符
+        private string SanitizeFolderName(string name)
+        {
+            if (string.IsNullOrWhiteSpace(name)) return "USB_DRIVE";
+
+            // 移除非法字符
+            var invalidChars = Path.GetInvalidFileNameChars();
+            var cleanName = new string(name
+                .Where(c => !invalidChars.Contains(c))
+                .ToArray())
+                .Trim();
+
+            // 处理保留设备名称（如CON、PRN等）
+            var reservedNames = new[] { "CON", "PRN", "AUX", "NUL",
+                              "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+                              "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9" };
+            if (reservedNames.Contains(cleanName.ToUpper())) cleanName += "_DATA";
+
+            // 移除首尾点和空格
+            cleanName = cleanName.Trim('.', ' ');
+
+            // 替换连续空格为单个下划线
+            cleanName = Regex.Replace(cleanName, @"\s+", "_");
+
+            // 处理空名称情况
+            if (string.IsNullOrWhiteSpace(cleanName)) return "USB_DRIVE";
+
+            // 限制长度并添加后缀
+            return cleanName.Length > 50
+                ? $"{cleanName.Substring(0, 45)}_TRUNC"
+                : cleanName;
         }
 
         private bool ValidateTargetDirectory()
         {
             if (string.IsNullOrWhiteSpace(textBox2.Text))
             {
-                LogMessage("错误：未选择目标目录");
+                LogMessage("错误：未选择目标目录", true);
                 return false;
             }
 
             try
             {
-                Directory.CreateDirectory(textBox2.Text);
+                // 新增路径格式验证
+                if (!Path.IsPathRooted(textBox2.Text))
+                {
+                    LogMessage("错误：目标路径必须是绝对路径",true);
+                    return false;
+                }
+
+                var fullPath = Path.GetFullPath(textBox2.Text);
+                if (fullPath.StartsWith(@"\\?\")) // 处理长路径格式
+                {
+                    LogMessage("警告：长路径格式可能需要系统支持", true);
+                }
+
+                Directory.CreateDirectory(fullPath);
+                textBox2.Text = fullPath; // 标准化路径格式
                 return true;
             }
             catch (Exception ex)
             {
-                LogMessage($"目录创建失败：{ex.Message}");
+                LogMessage($"目录验证失败：{ex.Message}",true);
                 return false;
             }
         }
@@ -213,7 +343,7 @@ namespace U盘文件复制
                 }
                 catch (IOException ex)
                 {
-                    LogMessage($"驱动器访问失败：{drive.Name} - {ex.Message}");
+                    LogMessage($"驱动器访问失败：{drive.Name} - {ex.Message}", true);
                 }
 
                 if (isValidDrive)
@@ -227,16 +357,18 @@ namespace U盘文件复制
         {
             try
             {
+                // 合并两条路径生成语句
                 var destDir = CreateDestinationDirectory(source, targetParentDir);
                 CopyFilesWithPatterns(source, destDir, searchPatterns);
                 ProcessSubdirectories(source, targetParentDir, searchPatterns);
             }
             catch (Exception ex)
             {
-                LogMessage($"目录处理失败: {source.FullName} | 错误：{ex.Message}");
+                LogMessage($"目录处理失败: {source.FullName} | 错误：{ex.Message}",true);
             }
         }
 
+        // 保持原有的CreateDestinationDirectory方法不变
         private string CreateDestinationDirectory(DirectoryInfo source, string targetParentDir)
         {
             var relativePath = source.FullName.Substring(Path.GetPathRoot(source.FullName).Length);
@@ -259,13 +391,14 @@ namespace U盘文件复制
                 }
                 catch (UnauthorizedAccessException ex)
                 {
-                    LogMessage($"文件访问被拒绝：{pattern} - {ex.Message}");
+                    LogMessage($"文件访问被拒绝：{pattern} - {ex.Message}",true);
                 }
             }
         }
 
         private void CopySingleFile(FileInfo file, string destDir)
         {
+            Interlocked.Increment(ref _totalFiles);
             try
             {
                 var destPath = Path.Combine(destDir, file.Name);
@@ -274,11 +407,38 @@ namespace U盘文件复制
                 {
                     sourceStream.CopyTo(destStream);
                 }
-                LogMessage($"成功复制：{file.FullName} -> {destPath}");
+                LogMessage($"成功复制：{file.FullName} -> {destPath}", false);
+                Interlocked.Increment(ref _successCount);
             }
             catch (Exception ex)
             {
-                LogMessage($"复制失败：{file.FullName} | 错误：{ex.Message}");
+                LogMessage($"复制失败：{file.FullName} | 错误：{ex.Message}", true);
+                Interlocked.Increment(ref _failureCount);
+            }
+            finally
+            {
+                UpdateCountDisplay();
+            }
+        }
+
+        private void UpdateCountDisplay()
+        {
+            // 线程安全读取计数器
+            int total = Interlocked.CompareExchange(ref _totalFiles, 0, 0);
+            int success = Interlocked.CompareExchange(ref _successCount, 0, 0);
+            int failure = Interlocked.CompareExchange(ref _failureCount, 0, 0);
+
+            // 安全更新UI
+            if (label4.InvokeRequired)
+            {
+                label4.BeginInvoke((Action)(() =>
+                {
+                    label4.Text = $"一共复制{total}文件，成功{success}个，失败{failure}个";
+                }));
+            }
+            else
+            {
+                label4.Text = $"一共复制{total}文件，成功{success}个，失败{failure}个";
             }
         }
 
@@ -300,6 +460,7 @@ namespace U盘文件复制
             AddMediaExtensions(extensions);
             AddCompressedExtensions(extensions);
             AddCustomExtensions(extensions);
+            AddAudioExtension(extensions);
             return extensions;
         }
 
@@ -310,11 +471,11 @@ namespace U盘文件复制
         private static readonly string[] PdfExtensions = { "*.pdf" };
         private static readonly string[] ImageExtensions = { "*.jpg", "*.jpeg", "*.png", "*.gif", "*.bmp", "*.webp" };
         private static readonly string[] VideoExtensions = { "*.mp4", "*.avi", "*.mov", "*.mkv", "*.wmv", "*.flv" };
-        private static readonly string[] CompressedExtensions = { "*.zip", "*.rar", "*.7z", "*.tar.gz", "*.gz", "*.bz2", "*.xz", "*.zst", "*.001", ".iso", ".wim", "cab" };
+        private static readonly string[] AudioExtensions = { "*.mp3", "*.wma", "*.wav", "*.ape", "*.ogg","*.flac","*.aac" };
+        private static readonly string[] CompressedExtensions = { "*.zip", "*.rar", "*.7z", "*.tar", "*.gz", "*.bz2", "*.xz", "*.zst", "*.001", ".iso", ".wim", "cab" };
 
         private void AddOfficeExtensions(List<string> extensions)
         {
-            // 使用更具语义化的复选框命名会更理想（如 cbPowerPoint）
             if (checkBox1.Checked) extensions.AddRange(PowerPointExtensions);
             if (checkBox2.Checked) extensions.AddRange(WordExtensions);
             if (checkBox3.Checked) extensions.AddRange(ExcelExtensions);
@@ -343,14 +504,36 @@ namespace U盘文件复制
                     .Select(ext => $"*.{ext}")
             );
         }
-
-        private void LogMessage(string message)
+        private void AddAudioExtension(List<string> extensions)
         {
-            var logEntry = $"[{DateTime.Now:HH:mm:ss}] {message}";
+            if (checkBox10.Checked) extensions.AddRange(AudioExtensions);
+        }
 
-            UpdateLogBuffer(logEntry);
-            UpdateLogDisplay(logEntry);
-            WriteToLogFile(logEntry);
+        private void LogMessage(string message, bool isError = false)
+        {
+            try
+            {
+                var logEntry = $"[{DateTime.Now:HH:mm:ss}] {message}";
+                var stackTrace = new StackTrace(2, true); // 跳过前两层调用
+                var frame = stackTrace.GetFrame(0);
+                var lineInfo = $"{Path.GetFileName(frame.GetFileName())}:{frame.GetFileLineNumber()}";
+
+                // 如果是错误，更新UI日志显示
+                if (isError)
+                {
+                    UpdateLogBuffer(logEntry);
+                    UpdateLogDisplay(logEntry);
+                }
+
+                // 所有日志都写入文件
+                WriteToLogFile(logEntry);
+            }
+            catch (Exception ex)
+            {
+                var errorMessage = $"[{DateTime.Now:HH:mm:ss}] 日志记录失败: {ex.Message}";
+                WriteToLogFile(errorMessage);
+                UpdateLogDisplay(errorMessage);
+            }
         }
 
         private void UpdateLogBuffer(string entry)
@@ -371,6 +554,11 @@ namespace U盘文件复制
                     {
                         _logBuffer.AppendLine(line);
                     }
+                    Task.Run(async () => {
+                        await Task.Delay(50);
+                        UpdateLogDisplay(_logBuffer.ToString());
+                        _logBuffer.Clear();
+                    });
 
                     // 修正行数计数器
                     _currentLogLines = keepLines.Count();
@@ -392,23 +580,10 @@ namespace U盘文件复制
                 return;
             }
 
-            richTextBox1.SuspendLayout();
-            try
-            {
-                if (richTextBox1.Lines.Length >= MaxLogLines)
-                {
-                    richTextBox1.Select(0, richTextBox1.GetFirstCharIndexFromLine(1));
-                    richTextBox1.SelectedText = "";
-                }
-
-                richTextBox1.AppendText(entry + Environment.NewLine);
-                richTextBox1.ScrollToCaret();
-            }
-            finally
-            {
-                richTextBox1.ResumeLayout();
-            }
+            richTextBox1.AppendText(entry + Environment.NewLine);
+            richTextBox1.ScrollToCaret();
         }
+
 
         private void WriteToLogFile(string entry)
         {
@@ -421,49 +596,39 @@ namespace U盘文件复制
             }
             catch (Exception ex)
             {
-                richTextBox1.BeginInvoke((Action)(() =>
+                var errorMessage = $"[{DateTime.Now:HH:mm:ss}] 日志文件写入失败: {ex.Message}";
+                // 直接更新UI显示错误
+                SafeInvokeAsync(() => richTextBox1.AppendText(errorMessage + Environment.NewLine));
+
+                // 尝试写入备用日志
+                try
                 {
-                    richTextBox1.AppendText($"[{DateTime.Now:HH:mm:ss}] 日志文件写入失败: {ex.Message}{Environment.NewLine}");
-                }));
+                    string backupLog = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "CopyLog.txt");
+                    File.AppendAllText(backupLog, errorMessage + Environment.NewLine);
+                }
+                catch { }
             }
         }
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
-            if (e.CloseReason == CloseReason.UserClosing)
+            // 先取消所有后台操作
+            _cts?.Cancel();
+
+            // 等待正在进行的日志写入完成
+            Task.Run(async () => {
+                await Task.Delay(500); // 根据实际情况调整等待时间
+                _usbWatcher?.Stop();
+                _usbWatcher?.Dispose();
+            }).Wait(1000); // 最多等待1秒
+
+            // 确保RichTextBox安全释放
+            if (!richTextBox1.IsDisposed)
             {
-                e.Cancel = true;  // 取消关闭
-                this.Hide();
-                notifyIcon.Visible = true;
-                this.ShowInTaskbar = false;
-                return;
+                richTextBox1.Dispose();
             }
 
-            // 正常关闭时的清理逻辑
-            _cts.Cancel();
-            _usbWatcher?.Stop();
-            _usbWatcher?.Dispose();
-            notifyIcon?.Dispose();  // 释放托盘资源
             base.OnFormClosing(e);
-        }
-
-
-        private void button2_Click_1(object sender, EventArgs e)
-        {
-            using (var fbd = new FolderBrowserDialog())
-            {
-                if (fbd.ShowDialog() == DialogResult.OK)
-                {
-                    textBox2.Text = fbd.SelectedPath;
-                }
-            }
-        }
-
-        private void button1_Click(object sender, EventArgs e)
-        {
-            this.Hide();
-            notifyIcon.Visible = true;
-            this.ShowInTaskbar = false;
         }
 
         private void ShowMainWindow()
@@ -481,12 +646,22 @@ namespace U盘文件复制
             Application.Exit();
         }
 
+        private void button2_Click(object sender, EventArgs e)
+        {
+            using (var fbd = new FolderBrowserDialog())
+            {
+                if (fbd.ShowDialog() == DialogResult.OK)
+                {
+                    textBox2.Text = fbd.SelectedPath;
+                }
+            }
+        }
+
         private void button1_Click_1(object sender, EventArgs e)
         {
             this.Hide();
             notifyIcon.Visible = true;
             this.ShowInTaskbar = false;
         }
-
     }
 }
